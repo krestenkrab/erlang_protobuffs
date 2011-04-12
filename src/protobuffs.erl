@@ -36,6 +36,7 @@
 -deprecated([{read_field_num_and_wire_type,1,next_version}]).
 -deprecated([{decode_value,3,next_version}]).
 -export([read_field_num_and_wire_type/1, decode_value/3]).
+-export([from_binary/2,to_binary/2]).
 
 -define(TYPE_VARINT, 0).
 -define(TYPE_64BIT, 1).
@@ -360,3 +361,84 @@ decode_varint(<<0:1, I:7, Rest/binary>>, Acc) ->
     {Result, Rest};
 decode_varint(<<1:1, I:7, Rest/binary>>, Acc) ->
     decode_varint(Rest, [I | Acc]).
+
+%% @hidden
+
+-record(pbencoding, {
+          decode :: fun((binary()) -> tuple()),
+          encode :: fun((tuple()) -> binary()),
+          erlify :: fun((tuple()) -> any()),
+          pbify  :: fun((any()) -> tuple())
+        }).
+
+-spec get_pbencoding(ProtoMsg :: atom()) -> #pbencoding{}.
+get_pbencoding(ProtoMsg) ->
+    case get(ProtoMsg) of
+        #pbencoding{}=Result ->
+            Result;
+
+        _ ->
+            [ProtoStr,MsgStr] = string:tokens(atom_to_list(ProtoMsg), "#"),
+
+            PBMod = list_to_atom(ProtoStr ++ "_pb"),
+            PBDecodeFun = list_to_atom("decode_" ++ MsgStr ++ "msg"),
+            PBEncodeFun = list_to_atom("encode_" ++ MsgStr ++ "msg"),
+
+            UtilMod = list_to_atom(ProtoStr ++ "_pb_util"),
+            ErlifyFun = list_to_atom("erlify_" ++ MsgStr),
+            PBifyFun = list_to_atom("pbify_" ++ MsgStr),
+
+            catch UtilMod:module_info(),
+
+            Result = #pbencoding{
+
+              decode = mkfun(PBMod,PBDecodeFun,1),
+
+              encode = mkfun(PBMod,PBEncodeFun,1),
+
+              pbify  = case erlang:function_exported(UtilMod,PBifyFun,1) of
+                           true  -> mkfun(UtilMod,PBifyFun,1);
+                           false -> fun identity/1
+                       end,
+
+              erlify = case erlang:function_exported(UtilMod,PBifyFun,1) of
+                           true  -> mkfun(UtilMod,PBifyFun,1);
+                           false -> fun identity/1
+                       end
+             },
+
+            put(ProtoMsg, Result),
+
+            Result
+    end.
+
+identity(A) ->
+     A.
+
+mkfun(Mod,Fun,Arity) ->
+    ModBin = atom_to_binary(Mod, latin1),
+    FunBin = atom_to_binary(Fun, latin1),
+    Binary = <<131,113,
+              100,0,(byte_size(ModBin)),ModBin/binary,
+              100,0,(byte_size(FunBin)),FunBin/binary,
+              97,Arity>>,
+    binary_to_term(Binary).
+
+%%----------------------------------------------------------------------
+%% @doc
+%%  Use from_binary(Binary, 'proto#msg')
+%% @end
+%%----------------------------------------------------------------------
+
+-spec from_binary(Binary::binary(), ProtoMsg :: atom()) -> term().
+from_binary(Binary,ProtoMsg) ->
+    #pbencoding{ decode=Decode, erlify=Erlify } = get_pbencoding(ProtoMsg),
+    Erlify(Decode(Binary)).
+
+-spec to_binary(Record::term(), ProtoMsg :: atom()) -> binary().
+to_binary(Record,ProtoMsg) ->
+    #pbencoding{ encode=Encode, pbify=PBIfy } = get_pbencoding(ProtoMsg),
+    Encode(PBIfy(Record)).
+
+
+
